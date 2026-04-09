@@ -177,7 +177,7 @@ class B2ChatService:
         """
         all_chats = []
         offset = 0
-        batch_size = 1000
+        batch_size = 200  # B2Chat API can timeout with larger batches + date filters
 
         while len(all_chats) < max_chats:
             batch = await self.export_chats(
@@ -264,9 +264,15 @@ class B2ChatService:
                 # Skip media URLs and empty messages
                 if not content or not content.strip():
                     continue
-                if content.startswith("https://lookaside.fbsbx.com/"):
+                if content.startswith(("https://lookaside.fbsbx.com/",
+                                       "https://scontent",
+                                       "https://b2chat-filesrepo.s3.",
+                                       "https://b2chat.io/",
+                                       "https://app.b2chat.io/")):
                     continue
-                if content.startswith("https://scontent"):
+                # Skip pure URLs with no other text
+                stripped = content.strip()
+                if stripped.startswith("https://") and " " not in stripped:
                     continue
 
                 messages.append({
