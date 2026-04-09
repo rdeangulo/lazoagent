@@ -18,6 +18,7 @@ from app.api.operators import router as operators_router
 from app.api.health import router as health_router
 from app.api.websockets import router as ws_router
 from app.api.webhooks import router as webhooks_router
+from app.api.b2chat import router as b2chat_router
 
 api_router = APIRouter()
 
@@ -38,3 +39,4 @@ api_router.include_router(channels_router, prefix="/channels", tags=["Channels"]
 api_router.include_router(shopify_router, prefix="/shopify", tags=["Shopify"])
 api_router.include_router(analytics_router, prefix="/analytics", tags=["Analytics"])
 api_router.include_router(operators_router, prefix="/operators", tags=["Operators"])
+api_router.include_router(b2chat_router, prefix="/b2chat", tags=["B2Chat"])

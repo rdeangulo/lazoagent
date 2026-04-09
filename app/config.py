@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     META_WHATSAPP_PHONE_ID: Optional[str] = None
     META_WHATSAPP_TOKEN: Optional[str] = None
 
+    # ── B2Chat (Historical Knowledge Import) ───────────────────────────────
+    B2CHAT_CLIENT_ID: Optional[str] = None
+    B2CHAT_CLIENT_SECRET: Optional[str] = None
+
     # ── Email (SMTP / IMAP) ──────────────────────────────────────────────
     SMTP_HOST: Optional[str] = None
     SMTP_PORT: int = 587
