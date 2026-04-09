@@ -18,11 +18,14 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Role-to-model mapping (can be overridden via env vars)
+# Role-to-model mapping — auto-selects based on available API keys
+_agent_provider = "anthropic" if settings.ANTHROPIC_API_KEY else "openai"
+_agent_model = settings.ANTHROPIC_MODEL if settings.ANTHROPIC_API_KEY else settings.OPENAI_MODEL
+
 _ROLE_MODELS = {
     "agent": {
-        "provider": "anthropic",
-        "model": settings.ANTHROPIC_MODEL,
+        "provider": _agent_provider,
+        "model": _agent_model,
     },
     "router": {
         "provider": "openai",

@@ -135,40 +135,44 @@ class KnowledgeService:
         embedding_vector = query_embedding[0]
 
         async with get_db_context() as db:
-            # pgvector cosine similarity search
-            # Using raw SQL for the vector operations
-            sql = text("""
-                SELECT
-                    kc.id,
-                    kc.content,
-                    kc.chunk_index,
-                    kd.title as document_title,
-                    kd.doc_type,
-                    1 - (kc.embedding <=> :embedding::vector) as score
-                FROM knowledge_chunks kc
-                JOIN knowledge_documents kd ON kd.id = kc.document_id
-                WHERE kd.status = 'ready'
-                    AND (:doc_type IS NULL OR kd.doc_type = :doc_type)
-                ORDER BY kc.embedding <=> :embedding::vector
-                LIMIT :limit
-            """)
+            # pgvector cosine similarity search using SQLAlchemy column expressions
+            from pgvector.sqlalchemy import Vector
+            from sqlalchemy import cast, literal_column, func
 
-            result = await db.execute(
-                sql,
-                {
-                    "embedding": str(embedding_vector),
-                    "doc_type": doc_type,
-                    "limit": limit,
-                },
+            embedding_str = "[" + ",".join(str(x) for x in embedding_vector) + "]"
+
+            # Build query using SQLAlchemy ORM with pgvector distance operator
+            distance = KnowledgeChunk.embedding.cosine_distance(embedding_vector)
+            score_expr = (1 - distance).label("score")
+
+            stmt = (
+                select(
+                    KnowledgeChunk.id,
+                    KnowledgeChunk.content,
+                    KnowledgeChunk.chunk_index,
+                    KnowledgeDocument.title.label("document_title"),
+                    KnowledgeDocument.doc_type,
+                    score_expr,
+                )
+                .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
+                .where(KnowledgeDocument.status == "ready")
+                .where(KnowledgeChunk.embedding.is_not(None))
+                .order_by(distance)
+                .limit(limit)
             )
 
-            rows = result.fetchall()
+            if doc_type:
+                stmt = stmt.where(KnowledgeDocument.doc_type == doc_type)
+
+            result = await db.execute(stmt)
+
+            rows = result.all()
             return [
                 {
                     "chunk_id": str(row.id),
                     "content": row.content,
                     "document_title": row.document_title,
-                    "doc_type": row.doc_type,
+                    "doc_type": row.doc_type.value if hasattr(row.doc_type, 'value') else str(row.doc_type),
                     "score": float(row.score),
                 }
                 for row in rows
