@@ -235,6 +235,12 @@ class B2ChatService:
     def extract_messages_from_chat(chat: dict) -> list[dict]:
         """Extract individual messages from a B2Chat chat object.
 
+        B2Chat message format:
+        - incoming: true = customer, false = agent
+        - body: message text
+        - type: TEXT, IMAGE, AUDIO, etc.
+        - created_at: timestamp
+
         Returns a list of dicts with:
         - role: 'customer' or 'agent'
         - content: message text
@@ -245,19 +251,30 @@ class B2ChatService:
 
         if isinstance(raw_messages, list):
             for msg in raw_messages:
-                role = "customer"
-                if msg.get("fromAgent") or msg.get("sender_type") == "agent":
+                # B2Chat uses 'incoming' boolean: true = customer, false = agent
+                if "incoming" in msg:
+                    role = "customer" if msg["incoming"] else "agent"
+                elif msg.get("fromAgent"):
                     role = "agent"
-                elif msg.get("type") == "OUTGOING" or msg.get("direction") == "outbound":
-                    role = "agent"
+                else:
+                    role = "customer"
 
                 content = msg.get("body") or msg.get("text") or msg.get("content") or ""
-                if content and content.strip():
-                    messages.append({
-                        "role": role,
-                        "content": content.strip(),
-                        "timestamp": msg.get("timestamp") or msg.get("created_at") or "",
-                    })
+
+                # Skip media URLs and empty messages
+                if not content or not content.strip():
+                    continue
+                if content.startswith("https://lookaside.fbsbx.com/"):
+                    continue
+                if content.startswith("https://scontent"):
+                    continue
+
+                messages.append({
+                    "role": role,
+                    "content": content.strip(),
+                    "timestamp": msg.get("created_at") or msg.get("timestamp") or "",
+                    "type": msg.get("type", "TEXT"),
+                })
 
         return messages
 
@@ -268,14 +285,25 @@ class B2ChatService:
         if not messages:
             return ""
 
-        channel = chat.get("messaging_provider") or chat.get("channel") or "unknown"
+        # B2Chat uses 'provider' for channel type
+        channel = chat.get("provider") or chat.get("messaging_provider") or "unknown"
         contact_name = (
-            chat.get("contact", {}).get("fullname")
+            chat.get("contact", {}).get("name")
+            or chat.get("contact", {}).get("fullname")
             or chat.get("contact_name")
             or "Customer"
         )
+        department = chat.get("department") or ""
+        agent_name = chat.get("agent", {}).get("name") or ""
 
-        lines = [f"[Channel: {channel} | Customer: {contact_name}]"]
+        header = f"[Channel: {channel} | Customer: {contact_name}"
+        if department:
+            header += f" | Dept: {department}"
+        if agent_name:
+            header += f" | Agent: {agent_name}"
+        header += "]"
+
+        lines = [header]
         for msg in messages:
             prefix = "CUSTOMER" if msg["role"] == "customer" else "AGENT"
             lines.append(f"{prefix}: {msg['content']}")
