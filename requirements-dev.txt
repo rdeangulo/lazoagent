@@ -1,0 +1,15 @@
+# Development dependencies (install with: pip install -r requirements-dev.txt)
+-r requirements.txt
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+httpx  # for TestClient
+
+# Code quality
+ruff==0.8.4
+mypy==1.13.0
+
+# Database testing
+factory-boy==3.3.1
