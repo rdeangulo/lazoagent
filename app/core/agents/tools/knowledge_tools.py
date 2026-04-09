@@ -1,8 +1,8 @@
 """
 Lazo Agent — Knowledge Base Tools
 
-RAG tools that search the vector store for relevant knowledge
-to answer customer questions about Lazo products, policies, etc.
+RAG tool that searches the vector store. This is the default
+tool available to all agents.
 """
 
 from __future__ import annotations
@@ -18,16 +18,13 @@ async def search_knowledge_base(
     doc_type: Optional[str] = None,
     limit: int = 5,
 ) -> str:
-    """Search Lazo's knowledge base for information relevant to the customer's question.
+    """Search the knowledge base for information relevant to the user's question.
 
-    Use this tool when the customer asks about:
-    - Product information, pricing, availability
-    - Store policies (returns, shipping, exchanges)
-    - Store locations and hours
-    - FAQs and general information
+    Use this tool to find answers about products, policies, procedures,
+    FAQs, and any other documented information.
 
     Args:
-        query: The search query based on what the customer is asking
+        query: The search query based on what the user is asking
         doc_type: Optional filter by document type (faq, policy, product, guide, general)
         limit: Maximum number of results to return
     """

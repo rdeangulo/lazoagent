@@ -1,77 +1,60 @@
-"""Lazo Agent — Authentication Routes"""
+"""Lazo Agent — Admin Authentication Routes"""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, EmailStr
 
-from app.core.database import get_db
-from app.core.security import get_current_operator, hash_password
-from app.schemas.auth import LoginRequest, RegisterRequest
-from app.services.operator_service import operator_service
+from app.core.security import create_access_token, get_current_admin, hash_password, verify_password
 
 router = APIRouter()
 
 
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
 @router.post("/login")
 async def login(request: LoginRequest, response: Response):
-    """Authenticate operator and return JWT token."""
-    try:
-        result = await operator_service.login(request.email, request.password)
+    """Admin login — returns JWT."""
+    from app.core.database import get_db_context
+    from sqlalchemy import select, text
 
-        # Set httponly cookie
-        response.set_cookie(
-            key="access_token",
-            value=result["access_token"],
-            httponly=True,
-            secure=True,
-            samesite="lax",
-            max_age=60 * 60 * 8,  # 8 hours
-        )
+    # Simple admin auth — check against a config table or env
+    # For now, using hardcoded check (replace with proper admin model later)
+    from app.config import settings
 
-        return result
+    # Check if there's an admin record in the database
+    async with get_db_context() as db:
+        result = await db.execute(text(
+            "SELECT id, email, name, password_hash FROM admins WHERE email = :email"
+        ), {"email": request.email})
+        admin = result.first()
 
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    if not admin or not verify_password(request.password, admin.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_access_token({
+        "sub": str(admin.id),
+        "email": admin.email,
+        "name": admin.name,
+    })
+
+    response.set_cookie(
+        key="access_token", value=token,
+        httponly=True, secure=True, samesite="lax", max_age=60 * 60 * 8,
+    )
+
+    return {"access_token": token, "name": admin.name, "email": admin.email}
 
 
 @router.post("/logout")
-async def logout(
-    response: Response,
-    operator: dict = Depends(get_current_operator),
-):
-    """Log out operator and clear session."""
-    await operator_service.logout(operator["sub"])
+async def logout(response: Response, admin: dict = Depends(get_current_admin)):
     response.delete_cookie("access_token")
     return {"message": "Logged out"}
 
 
-@router.post("/register")
-async def register(
-    request: RegisterRequest,
-    db: AsyncSession = Depends(get_db),
-    operator: dict = Depends(get_current_operator),
-):
-    """Register a new operator (admin only)."""
-    if operator.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    from app.models import Operator
-    from app.models.operator import OperatorRole
-
-    new_operator = Operator(
-        email=request.email,
-        name=request.name,
-        password_hash=hash_password(request.password),
-        role=OperatorRole(request.role),
-    )
-    db.add(new_operator)
-    await db.commit()
-
-    return {"id": str(new_operator.id), "email": new_operator.email, "name": new_operator.name}
-
-
 @router.get("/me")
-async def get_me(operator: dict = Depends(get_current_operator)):
-    """Get current operator info from JWT."""
-    return operator
+async def get_me(admin: dict = Depends(get_current_admin)):
+    return admin

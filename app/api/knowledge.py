@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_operator
+from app.core.security import get_current_admin
 from app.models import KnowledgeDocument
 from app.models.knowledge import DocumentStatus
 from app.schemas.knowledge import DocumentUploadRequest, SearchRequest
@@ -25,7 +25,7 @@ async def list_documents(
     limit: int = Query(50, le=100),
     offset: int = Query(0),
     db: AsyncSession = Depends(get_db),
-    operator: dict = Depends(get_current_operator),
+    admin: dict = Depends(get_current_admin),
 ):
     """List knowledge base documents."""
     stmt = select(KnowledgeDocument).order_by(KnowledgeDocument.created_at.desc())
@@ -59,7 +59,7 @@ async def list_documents(
 @router.post("/documents")
 async def upload_document(
     request: DocumentUploadRequest,
-    operator: dict = Depends(get_current_operator),
+    admin: dict = Depends(get_current_admin),
 ):
     """Upload a new document to the knowledge base."""
     result = await knowledge_service.upload_document(
@@ -67,7 +67,7 @@ async def upload_document(
         content=request.content,
         doc_type=request.doc_type,
         description=request.description,
-        uploaded_by_id=operator["sub"],
+        uploaded_by_id=admin.get("sub"),
     )
     return result
 
@@ -76,7 +76,7 @@ async def upload_document(
 async def delete_document(
     document_id: str,
     db: AsyncSession = Depends(get_db),
-    operator: dict = Depends(get_current_operator),
+    admin: dict = Depends(get_current_admin),
 ):
     """Delete a document and its chunks."""
     stmt = select(KnowledgeDocument).where(KnowledgeDocument.id == document_id)
@@ -94,7 +94,7 @@ async def delete_document(
 @router.post("/search")
 async def search_knowledge(
     request: SearchRequest,
-    operator: dict = Depends(get_current_operator),
+    admin: dict = Depends(get_current_admin),
 ):
     """Search the knowledge base (same as AI tool, for CRM use)."""
     results = await knowledge_service.search(

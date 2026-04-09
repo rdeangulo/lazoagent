@@ -6,13 +6,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core.security import get_current_operator
+from app.core.security import get_current_admin
 
 router = APIRouter()
 
 
 @router.get("/health")
-async def b2chat_health(operator: dict = Depends(get_current_operator)):
+async def b2chat_health(admin: dict = Depends(get_current_admin)):
     """Check B2Chat API connectivity."""
     from app.services.b2chat_service import b2chat_service
 
@@ -33,14 +33,14 @@ async def sync_knowledge(
     date_to: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     messaging_provider: Optional[str] = Query(None, description="whatsapp|facebook|telegram|livechat"),
     max_chats: int = Query(5000, le=50000),
-    operator: dict = Depends(get_current_operator),
+    admin: dict = Depends(get_current_admin),
 ):
     """Trigger B2Chat → Knowledge Base sync.
 
     Pulls historical conversations from B2Chat, processes them through
     the LLM synthesis pipeline, and stores as knowledge documents.
     """
-    if operator.get("role") != "admin":
+    if not admin.get("sub"):
         raise HTTPException(status_code=403, detail="Admin access required")
 
     from app.services.b2chat_ingestion import ingestion_pipeline
@@ -51,7 +51,7 @@ async def sync_knowledge(
             date_to=date_to,
             messaging_provider=messaging_provider,
             max_chats=max_chats,
-            uploaded_by_id=operator.get("sub"),
+            uploaded_by_id=admin.get("sub"),
         )
         return result
     except Exception as e:
@@ -64,7 +64,7 @@ async def preview_chats(
     date_to: Optional[str] = Query(None),
     messaging_provider: Optional[str] = Query(None),
     limit: int = Query(10, le=100),
-    operator: dict = Depends(get_current_operator),
+    admin: dict = Depends(get_current_admin),
 ):
     """Preview B2Chat conversations before syncing.
 

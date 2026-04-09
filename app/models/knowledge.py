@@ -77,12 +77,12 @@ class KnowledgeDocument(Base, UUIDMixin, TimestampMixin):
 
     # Uploaded by
     uploaded_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("operators.id")
+        UUID(as_uuid=True), ForeignKey("admins.id"), nullable=True
     )
 
     # Relationships
     chunks = relationship("KnowledgeChunk", back_populates="document", cascade="all, delete-orphan")
-    uploaded_by = relationship("Operator")
+    uploaded_by = relationship("Admin")
 
     __table_args__ = (
         Index("ix_knowledge_docs_status", "status"),
