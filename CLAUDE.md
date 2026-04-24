@@ -1,173 +1,192 @@
 # Lazo Agent — CLAUDE.md
 
-AI-powered customer service platform for Lazo (retail stores + Shopify e-commerce).
+AI Agent Training Platform. Create, train, and deploy AI agents with their own personas, tools, and knowledge bases. External CRMs call `POST /api/v1/chat` to get a response from a configured agent.
 
 ## Project Overview
 
-Lazo Agent is a multi-channel customer service platform that combines an AI assistant with a human operator CRM. The AI handles customer inquiries using a knowledge base (RAG) and Shopify integration, escalating to human agents when needed. When no agents are online, conversations are captured in an inbox system with contact data for follow-up.
+This repo is the **headless brain** — given `agent_id + message + thread_id`, it returns `{response, tool_calls}`. The conversation management layer (threads, channels, escalation, inbox, operator CRM) lives in a **separate system** that calls into this one.
 
-**Business context**: Lazo operates retail stores and an online Shopify store. Agents are NOT available 24/7, making the inbox system critical for capturing customer needs during off-hours.
+**What lives here:**
+- Admin authoring: creating agents, editing system prompts, uploading knowledge docs, configuring tools, picking LLM provider/model.
+- Runtime: a LangGraph loop that takes a message, runs the agent with its configured tools, returns a response.
+- Knowledge base (pgvector RAG) attached to agents.
+- Training playground for testing agent behavior before shipping.
+- API-key-authenticated inference endpoint for external callers.
+
+**What does NOT live here:**
+- Thread/channel management (WhatsApp, web chat, email, WebSocket)
+- Human operator CRM, escalation flows, inbox, SLA tracking
+- Customer contact data beyond what's passed in `context` per request
 
 ## Architecture
 
 ### Tech Stack
-- **Backend**: Python 3.13, FastAPI, SQLAlchemy (async + asyncpg), PostgreSQL 16, Redis 7
-- **AI**: LangGraph + LangChain, Anthropic Claude (primary), OpenAI (fallback/embeddings)
-- **Observability**: Langfuse (prompt management + tracing), Sentry (errors)
-- **Channels**: Twilio (WhatsApp), Meta (Facebook/Instagram/WhatsApp Cloud API), Web Chat (WebSocket), Email (SMTP/IMAP)
-- **E-commerce**: Shopify Admin API
-- **CRM**: React + TypeScript + Tailwind (Vite SPA, served from FastAPI static)
-- **Deployment**: Render (or Docker Compose locally)
+- **Backend**: Python 3.13, FastAPI, SQLAlchemy (async + asyncpg), PostgreSQL 16 + pgvector, Redis 7
+- **AI orchestration**: LangGraph + LangChain
+- **LLM providers**: OpenAI (default) and Anthropic (both supported; per-agent config)
+- **Embeddings**: OpenAI `text-embedding-3-small` (1536 dims)
+- **Prompt management**: optional Langfuse (agent can reference `langfuse_prompt_name` to fetch prompt at runtime)
+- **External integrations**: Shopify (Admin GraphQL + Storefront MCP), B2Chat (historical import)
+- **Deployment**: Docker / Render
 
-### High-Level Data Flow
+### High-level request flow
 ```
-Customer → Channel (WhatsApp/Web/FB/IG/Email)
-         → Webhook/WebSocket
-         → Thread System (find or create thread)
-         → AI Agent (LangGraph)
-             ├── Knowledge Base (pgvector RAG)
-             ├── Shopify (order lookup)
-             ├── Escalation → Online Agent (WebSocket) OR Inbox (contact capture)
-             └── Response → Channel (outbound delivery)
+External CRM
+  │ POST /api/v1/chat  { agent_id, message, thread_id, context }
+  │ X-API-Key: ...
+  ▼
+Inference API  ── resolves Agent record (agent_id/slug)
+  │
+  ▼
+Agent bridge  ── builds agent_config from the Agent row
+  │             (system_prompt, llm_provider, llm_model, enabled_tools, …)
+  ▼
+LangGraph   START → agent → [tools → agent]* → END
+  │
+  ├─ agent_node       ── binds only the tools listed in enabled_tools
+  │                      to the LLM; invokes once per turn
+  └─ tool_node        ── executes whichever tool the LLM called
+                         (knowledge search, Shopify, product lookup, …)
+  ▼
+ChatResponse  { response, tool_calls, agent_id, thread_id }
 ```
 
 ### Directory Structure
 ```
 lazoagent/
 ├── app/
-│   ├── main.py              # FastAPI app, lifespan, middleware, routes
-│   ├── config.py             # pydantic-settings v2, all env vars
-│   ├── api/                  # FastAPI routers
-│   │   ├── __init__.py       # Router aggregation
-│   │   ├── auth.py           # JWT login/logout/register
-│   │   ├── threads.py        # Thread CRUD + message creation + AI processing
-│   │   ├── escalation.py     # Escalation management
-│   │   ├── inbox.py          # Inbox items (offline follow-ups)
-│   │   ├── knowledge.py      # Knowledge base CRUD + search
-│   │   ├── channels.py       # Channel management
-│   │   ├── shopify.py        # Shopify order lookup (CRM-facing)
-│   │   ├── analytics.py      # Dashboard metrics
-│   │   ├── operators.py      # Operator management
-│   │   ├── health.py         # Health checks
-│   │   ├── websockets.py     # WS endpoints (thread + global CRM)
-│   │   └── webhooks/         # External service webhooks
-│   │       ├── twilio.py     # WhatsApp via Twilio
-│   │       ├── meta.py       # Facebook/Instagram/WhatsApp Cloud API
-│   │       └── shopify_wh.py # Shopify order events
-│   ├── core/                 # Infrastructure layer
-│   │   ├── database.py       # Async SQLAlchemy engine + sessions
-│   │   ├── redis.py          # Redis client with graceful degradation
-│   │   ├── security.py       # JWT, password hashing, webhook verification
-│   │   ├── websocket_manager.py  # WS connections + Redis pub/sub
-│   │   ├── exceptions.py     # Structured exception hierarchy
-│   │   └── agents/           # AI agent system
-│   │       ├── graph.py      # LangGraph definition (START → agent ↔ tools → END)
-│   │       ├── state.py      # AgentState TypedDict + message sanitization
-│   │       ├── nodes.py      # Agent node + tool node + routing logic
-│   │       ├── bridge.py     # Entry point for all channels → AI processing
-│   │       ├── llm.py        # Multi-provider LLM factory (Anthropic/OpenAI)
-│   │       ├── prompt_registry.py  # Langfuse prompts with local fallback
-│   │       └── tools/        # LangChain tools
-│   │           ├── knowledge_tools.py   # search_knowledge_base
-│   │           ├── shopify_tools.py     # check_order_status, get_order_history
-│   │           ├── escalation_tools.py  # escalate_to_agent, capture_contact_info
-│   │           └── common_tools.py      # thread_complete
-│   ├── models/               # SQLAlchemy models (PostgreSQL)
-│   │   ├── base.py           # Base, TimestampMixin, UUIDMixin
-│   │   ├── customer.py       # Customer (contact data, Shopify link)
-│   │   ├── operator.py       # Operator (agent) + OperatorLog
-│   │   ├── channel.py        # Channel types + operator_channels M2M
-│   │   ├── thread.py         # Thread (active/escalated/taken/inbox/closed)
-│   │   ├── message.py        # Messages (customer/assistant/operator/system)
-│   │   ├── escalation.py     # Escalation + EscalationNote
-│   │   ├── inbox.py          # InboxItem (offline follow-up with SLA)
-│   │   ├── knowledge.py      # KnowledgeDocument + KnowledgeChunk (pgvector)
-│   │   └── shopify.py        # ShopifyOrder cache + WebhookLog
-│   ├── schemas/              # Pydantic request/response models
-│   ├── services/             # Business logic layer
-│   │   ├── shopify_service.py     # Shopify Admin API client
-│   │   ├── knowledge_service.py   # RAG: upload, chunk, embed, search
-│   │   ├── escalation_service.py  # Route to agent or inbox
-│   │   ├── inbox_service.py       # Inbox CRUD + SLA tracking
-│   │   ├── channel_service.py     # Outbound message delivery
-│   │   ├── operator_service.py    # Login/logout/status management
-│   │   └── analytics_service.py   # Metrics computation
-│   ├── middleware/           # CORS, rate limiting
-│   ├── prompts/              # Local prompt files (Langfuse fallback)
-│   ├── templates/            # Email templates
-│   └── static/               # Built CRM SPA files
-├── alembic/                  # Database migrations
-├── crm/                      # React CRM SPA (Vite + TypeScript + Tailwind)
-├── tests/                    # Pytest test suite
-├── scripts/                  # Maintenance scripts
-├── docker-compose.yml        # Local development (PostgreSQL + Redis + API)
-├── Dockerfile                # Production container
-├── render.yaml               # Render Blueprint deployment
-└── requirements.txt          # Python dependencies
+│   ├── main.py                # FastAPI app + lifespan
+│   ├── config.py              # pydantic-settings v2, all env vars
+│   ├── api/
+│   │   ├── __init__.py        # Router aggregation (mounted at /api)
+│   │   ├── auth.py            # Admin login (JWT)
+│   │   ├── agents.py          # Agent CRUD + config
+│   │   ├── knowledge.py       # Document upload / chunking / search
+│   │   ├── training.py        # Test playground endpoint
+│   │   ├── api_keys.py        # API keys for external callers
+│   │   ├── inference.py       # POST /v1/chat (external integration point)
+│   │   ├── b2chat.py          # B2Chat historical conversation ingestion
+│   │   └── health.py
+│   ├── core/
+│   │   ├── database.py        # Async SQLAlchemy engine + sessions
+│   │   ├── redis.py           # Graceful-degradation Redis client
+│   │   ├── security.py        # JWT, API-key lookup, password hashing
+│   │   └── agents/
+│   │       ├── bridge.py      # process_message(): single entry into the graph
+│   │       ├── graph.py       # LangGraph definition
+│   │       ├── state.py       # AgentState + message sanitization
+│   │       ├── nodes.py       # agent_node + tool_node + TOOL_REGISTRY
+│   │       ├── llm.py         # Anthropic/OpenAI factory
+│   │       ├── prompt_registry.py  # Langfuse-with-local-fallback
+│   │       └── tools/
+│   │           ├── knowledge_tools.py          # search_knowledge_base
+│   │           ├── common_tools.py             # thread_complete
+│   │           ├── shopify_tools.py            # check_order_status
+│   │           └── shopify_storefront_tools.py # search_products, get_product_details, search_policies
+│   ├── models/
+│   │   ├── base.py            # Base + TimestampMixin + UUIDMixin
+│   │   ├── admin.py           # Admin user (JWT login)
+│   │   ├── agent.py           # Agent (persona, tools, LLM config)
+│   │   ├── api_key.py         # External-caller API keys
+│   │   ├── knowledge.py       # KnowledgeDocument + KnowledgeChunk (pgvector)
+│   │   └── training.py        # TrainingSession (playground records)
+│   ├── services/
+│   │   ├── agent_service.py              # Agent CRUD + config resolution
+│   │   ├── knowledge_service.py          # Upload / chunk / embed / search
+│   │   ├── training_service.py           # Playground runs
+│   │   ├── b2chat_service.py             # B2Chat API client
+│   │   ├── b2chat_ingestion.py           # Import conversations into knowledge
+│   │   ├── shopify_service.py            # Shopify Admin GraphQL (orders)
+│   │   └── shopify_storefront_service.py # Shopify Storefront MCP (catalog, policies)
+│   ├── schemas/                # Pydantic request/response models
+│   ├── middleware/             # CORS, rate limiting
+│   ├── prompts/                # Local prompt fallback when Langfuse unavailable
+│   └── static/                 # Admin UI build (if present)
+├── alembic/                    # Database migrations
+├── scripts/
+│   ├── shopify_oauth_install.py  # One-shot OAuth helper for capturing offline Shopify token
+│   └── refresh_shopify_token.sh  # Fallback CLI token refresher (not needed for offline tokens)
+├── tests/
+├── docker-compose.yml
+├── Dockerfile
+└── requirements.txt
 ```
 
 ## Key Concepts
 
-### Thread Lifecycle
-```
-ACTIVE → AI is handling the conversation
-  ├── ESCALATED → Agent is online, waiting for pickup
-  │     └── TAKEN → Agent has taken over, AI is silent
-  ├── INBOX → No agent online, contact captured for follow-up
-  └── CLOSED → Resolved (by AI or agent)
-```
+### Agent
+The central entity (`app.models.agent.Agent`). Each agent has:
+- `name`, `slug`, `status` (draft/active/paused/archived)
+- `system_prompt` (or `langfuse_prompt_name` to fetch from Langfuse)
+- `llm_provider` (`openai` or `anthropic`), `llm_model`, `temperature`, `max_tokens`
+- `enabled_tools` — JSONB list of tool names; only these are bound to the LLM at runtime
+- `knowledge_doc_types` — optional filter restricting which documents this agent can search
+- `knowledge_search_limit`, `knowledge_score_threshold` — RAG tuning
 
-### Escalation Flow
-1. AI calls `escalate_to_agent` tool (or auto-escalates on error)
-2. System checks for online operators
-3. **Agent online** → Create Escalation record, set thread to ESCALATED, notify via WebSocket
-4. **No agent** → AI asks for contact info, calls `capture_contact_info`, creates InboxItem with SLA deadline
-5. When agent logs in, they see pending inbox items and escalations
+The Agent row is the full configuration; the runtime never reads hardcoded constants for persona or tools.
+
+### LangGraph runtime
+Simple loop defined in `app/core/agents/graph.py`:
+```
+START → agent → tools_condition ── END
+                │
+                └─ tools → agent (loop)
+```
+- `agent_node` reads `state.meta_data["agent_config"]`, picks tools from `TOOL_REGISTRY`, binds them to the LLM, invokes.
+- `tool_node` (ToolNode) executes the requested tool and loops back.
+- No hardcoded intent routing — the LLM decides when to call tools based on tool docstrings.
+- Circuit breaker in `bridge.py`: 5 failures → open for 60s → auto-degrades.
+
+### Tool Registry
+Defined in `app/core/agents/nodes.py`. Currently:
+
+| Name | Purpose |
+|---|---|
+| `search_knowledge_base` | RAG over uploaded documents (pgvector cosine similarity) |
+| `check_order_status` | Shopify Admin GraphQL — order lookup by name or email |
+| `search_products` | Shopify Storefront MCP — live product catalog search |
+| `get_product_details` | Shopify Storefront MCP — detail + variant-specific lookup |
+| `search_policies` | Shopify Storefront MCP — shop policies & FAQ |
+| `thread_complete` | Mark conversation resolved |
+
+To add a tool: create a `@tool`-decorated async function in `app/core/agents/tools/`, register it in `TOOL_REGISTRY`, then any agent can opt in by adding its name to `enabled_tools`.
 
 ### Knowledge Base (RAG)
-1. Admin uploads document via CRM → `KnowledgeDocument` created
-2. Background task chunks text (1000 char chunks, 200 overlap)
-3. OpenAI generates embeddings → stored in `KnowledgeChunk.embedding` (pgvector)
-4. AI tool `search_knowledge_base` does cosine similarity search
-5. Results injected into agent context for response generation
+- Admin uploads a document → `KnowledgeDocument` row
+- Background task chunks (1000 char / 200 overlap), embeds via OpenAI, stores vector in `KnowledgeChunk.embedding` (pgvector)
+- `search_knowledge_base` tool does cosine similarity (`<=>` operator) filtered by the agent's `knowledge_doc_types` if set
 
-### LangGraph Agent
-Simple but effective graph: `START → agent → [tools → agent]* → END`
-- Single agent node (no intent routing — simpler than Nexus)
-- Tools: knowledge search, Shopify orders, escalation, contact capture
-- Circuit breaker: 5 failures → open for 60s → auto-escalate
-- Langfuse callbacks for full LLM trace observability
+### Shopify Integration (current setup for LAZO)
+Two surfaces:
+1. **Admin GraphQL API** (`app/services/shopify_service.py`) — authenticated with an offline `shpca_…` access token obtained via the Peregrino Partner org's Custom Distribution app. Cost-aware retry on `THROTTLED` responses.
+2. **Storefront MCP** (`app/services/shopify_storefront_service.py`) — public `/api/mcp` JSON-RPC endpoint, no auth needed. Used for customer-facing catalog/policy queries.
 
-### Prompt Management
-- **Primary**: Langfuse (production label, 60s cache)
-- **Fallback**: Local `.md` files in `app/prompts/`
-- **Security**: Prompt injection detection + input sanitization
-- **Context**: Dynamic injection of datetime, language, channel, customer info
+The OAuth install for the Admin token is a one-shot via `scripts/shopify_oauth_install.py`. If it ever needs re-running, see the script docstring.
 
 ## Commands
 
 ### Development
 ```bash
-# Start infrastructure (PostgreSQL + Redis)
+# Infra
 docker compose up db redis -d
 
-# Create virtual environment
+# Venv + deps
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# Copy environment config
-cp .env.example .env  # Edit with your API keys
+# Env
+cp .env.example .env   # Fill in API keys
 
-# Run migrations
+# DB
 alembic upgrade head
 
-# Start dev server
+# Dev server
 uvicorn app.main:app --reload --port 3000
 
-# Run tests
+# Tests
 pytest
 
-# Run linter
+# Lint
 ruff check app/
 ```
 
@@ -178,120 +197,107 @@ docker compose up --build
 # Docs at http://localhost:3000/api/docs
 ```
 
-### Database Migrations
+### Migrations
 ```bash
-# Create a new migration after model changes
-alembic revision --autogenerate -m "description of change"
-
-# Apply migrations
+alembic revision --autogenerate -m "description"
 alembic upgrade head
-
-# Rollback one step
 alembic downgrade -1
-```
-
-### Deployment (Render)
-Push to main branch triggers auto-deploy. Manual:
-```bash
-render deploy
 ```
 
 ## Conventions
 
 ### Code Style
-- Python 3.13+ features welcome (type hints, match statements, etc.)
-- Async everywhere — all DB operations, HTTP calls, and service methods are async
-- Use `from __future__ import annotations` in all files
-- Services are singletons instantiated at module level
-- Models use UUID primary keys and TimestampMixin for created_at/updated_at
-- JSONB columns use `MutableDict.as_mutable(JSONB)` for in-place mutation detection
+- Python 3.13+ features welcome (type hints, match, etc.)
+- Async everywhere
+- `from __future__ import annotations` at top of files
+- Services instantiated as module-level singletons
+- Models use UUID primary keys + TimestampMixin
+- JSONB columns via `MutableDict.as_mutable(JSONB)` / `MutableList.as_mutable(JSONB)` for in-place mutation detection
 
 ### Naming
 - Files: `snake_case.py`
 - Classes: `PascalCase`
-- Functions/methods: `snake_case`
-- API routes: kebab-case URL paths, snake_case query params
-- Database tables: plural `snake_case` (e.g., `inbox_items`, `knowledge_chunks`)
-- Enums: `PascalCase` class, `UPPER_CASE` values
+- Functions: `snake_case`
+- Database tables: plural `snake_case` (`agents`, `knowledge_chunks`)
 
-### Error Handling
-- Use the exception hierarchy in `app/core/exceptions.py`
-- Services raise domain exceptions; API routes catch and return HTTP errors
-- Background tasks use fire-and-forget (`asyncio.create_task`) for non-critical operations
-- Circuit breaker in bridge.py auto-escalates on repeated AI failures
-
-### API Patterns
-- All protected routes require JWT via `Depends(get_current_operator)`
-- Pagination: `limit` + `offset` query params, response includes `total`
-- List endpoints return `{"items": [...], "total": N}` or named lists
-- Webhook endpoints verify signatures before processing
-- WebSocket endpoints at `/ws/{thread_id}` and `/ws/global`
+### Error handling
+- Services raise; API routes catch and return HTTP errors
+- Background tasks use fire-and-forget (`asyncio.create_task`) for non-critical work
+- Circuit breaker in `bridge.py` prevents runaway failures to the LLM provider
 
 ### Database
-- Always use async sessions (`AsyncSession`)
-- Use `get_db_context()` context manager outside FastAPI routes
-- pgvector for knowledge base embeddings (cosine similarity: `<=>`)
-- All models in `app/models/` and re-exported from `app/models/__init__.py`
-
-### Testing
-- Pytest with `pytest-asyncio` (auto mode)
-- Use `httpx.AsyncClient` with `ASGITransport` for API tests
-- Test files mirror source structure: `tests/test_api/`, `tests/test_services/`
+- Always async sessions (`AsyncSession`)
+- `get_db_context()` for non-FastAPI consumers
+- pgvector for embeddings — cosine similarity via `<=>`
 
 ## Environment Variables
 
-See `.env.example` for the full list. Critical ones:
+See `.env.example`. Minimum to run:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `DATABASE_URL` | Yes | PostgreSQL connection (asyncpg) |
-| `REDIS_URL` | No | Redis (graceful degradation if missing) |
-| `SECRET_KEY` | Yes | JWT signing key |
-| `ANTHROPIC_API_KEY` | Yes | Primary LLM provider |
-| `OPENAI_API_KEY` | Yes | Embeddings + fallback LLM |
-| `LANGFUSE_PUBLIC_KEY` | No | Prompt management + tracing |
-| `LANGFUSE_SECRET_KEY` | No | Prompt management + tracing |
-| `SHOPIFY_STORE_URL` | No | Shopify store domain |
-| `SHOPIFY_ACCESS_TOKEN` | No | Shopify Admin API token |
-| `TWILIO_ACCOUNT_SID` | No | WhatsApp via Twilio |
-| `TWILIO_AUTH_TOKEN` | No | WhatsApp via Twilio |
-| `META_APP_SECRET` | No | Facebook/Instagram/WhatsApp Cloud |
+| `DATABASE_URL` | Yes | Postgres (asyncpg) |
+| `DATABASE_URL_SYNC` | Yes | Postgres (sync, for Alembic) |
+| `REDIS_URL` | No | Redis (gracefully absent) |
+| `SECRET_KEY` | Yes | JWT signing |
+| `OPENAI_API_KEY` | Yes* | Default LLM + embeddings |
+| `ANTHROPIC_API_KEY` | Yes* | If any agent uses provider=anthropic |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | No | Remote prompt management + tracing |
+| `SHOPIFY_STORE_URL` | No | Shopify `*.myshopify.com` domain |
+| `SHOPIFY_ACCESS_TOKEN` | No | Offline `shpca_…` token for Admin API |
+| `SENTRY_DSN` | No | Error tracking |
+
+\* At least one LLM provider key is required.
 
 ## Common Tasks
 
 ### Add a new AI tool
-1. Create tool function in `app/core/agents/tools/` with `@tool` decorator
-2. Add clear docstring (the LLM reads this to decide when to use it)
-3. Import and add to `AGENT_TOOLS` list in `app/core/agents/nodes.py`
-4. Add corresponding service method if the tool needs business logic
+1. Write a `@tool`-decorated async function in `app/core/agents/tools/` with a clear docstring (the LLM reads it to decide when to invoke).
+2. Register it in `TOOL_REGISTRY` in `app/core/agents/nodes.py`.
+3. Add the tool name to the relevant agents' `enabled_tools` list.
 
-### Add a new channel
-1. Add enum value to `ChannelType` in `app/models/channel.py`
-2. Add webhook handler in `app/api/webhooks/`
-3. Add delivery method in `app/services/channel_service.py`
-4. Register webhook route in `app/api/webhooks/__init__.py`
+### Add a new Agent (via DB)
+Typically done through the admin UI. For one-off/SQL:
+```sql
+INSERT INTO agents (id, name, slug, status, system_prompt, llm_provider, llm_model, enabled_tools)
+VALUES (gen_random_uuid(), 'LAZO Customer Service', 'lazo-cs', 'active',
+        '...', 'openai', 'gpt-4.1-mini',
+        '["search_products","check_order_status","search_policies","search_knowledge_base","thread_complete"]'::jsonb);
+```
 
-### Add a new model
-1. Create model file in `app/models/`
-2. Import in `app/models/__init__.py`
-3. Run `alembic revision --autogenerate -m "add model_name"`
-4. Review and apply: `alembic upgrade head`
+### Modify agent persona / system prompt
+- **Preferred**: edit in Langfuse if `langfuse_prompt_name` is set on the Agent — changes propagate within the prompt cache TTL.
+- **Otherwise**: update `agents.system_prompt` directly (admin UI or SQL).
 
-### Modify the AI prompt
-1. Edit in Langfuse (preferred) — changes take effect within 60s
-2. Or edit `app/prompts/base_agent.md` (local fallback)
-3. For structural changes to prompt composition, edit `app/core/agents/prompt_registry.py`
+### Call the inference API from an external CRM
+```bash
+curl -X POST http://localhost:3000/api/v1/chat \
+  -H "X-API-Key: <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_slug": "lazo-cs",
+    "message": "dónde está mi pedido?",
+    "thread_id": "customer-123",
+    "language": "es",
+    "context": {"customer_email": "x@y.com"}
+  }'
+```
+
+Response includes `{response, tool_calls, agent_id, thread_id}`. The CRM decides what to do with it (deliver to channel, escalate, capture lead, etc.).
 
 ## Design Decisions
 
-### Why single agent instead of multi-agent (like Nexus)?
-Lazo's needs are simpler — general customer service + order tracking. No need for sales/support/transfer specialization. A single agent with the right tools is more maintainable and less latency.
+### Why headless (no CRM/escalation here)?
+Separation of concerns. The conversation management platform handles threading, channels, operator handoff, and SLA — which are operationally complex and often org-specific. This repo stays focused on agent authoring + inference so both sides can evolve independently.
+
+### Why per-agent config in the DB (not YAML)?
+Non-technical users can create/iterate on agents via the admin UI without code deploys. The tool names, prompt, and LLM choice are all data.
+
+### Why LangGraph's simple agent loop instead of explicit intent routing?
+Tool docstrings + a strong system prompt let the LLM route itself. Adding an intent-classifier layer is extra latency + failure points for negligible quality gain at current tool counts. If the tool surface grows substantially (>15), revisit.
 
 ### Why pgvector instead of a dedicated vector DB?
-Keeps the stack simple — one database for everything. For Lazo's scale (thousands of knowledge chunks, not millions), pgvector is performant enough. Easy to migrate to Pinecone/Weaviate later if needed.
+Single database to operate. For target scale (tens of thousands of chunks per tenant), pgvector is fast enough. Migrate to a specialized store only if/when this stops being true.
 
-### Why inbox system instead of just queue?
-Agents aren't 24/7. The inbox captures contact data (email/phone) so agents can proactively follow up later, even through a different channel. SLA tracking ensures nothing falls through the cracks.
-
-### Why Langfuse for prompts?
-Versioned prompts with production labels mean you can A/B test prompt changes, roll back instantly, and trace exactly which prompt version generated which response. The local fallback ensures the system works even if Langfuse is down.
+### Why two Shopify clients (Admin GraphQL and Storefront MCP)?
+They do different things. Admin GraphQL needs auth and surfaces order/customer data. Storefront MCP is public and surfaces the shopper-facing catalog. Mixing them into one client would conflate two permission models.
