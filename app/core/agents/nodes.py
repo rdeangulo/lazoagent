@@ -15,6 +15,12 @@ from langchain_core.messages import SystemMessage
 from app.core.agents.state import AgentState, sanitize_messages
 from app.core.agents.tools.knowledge_tools import search_knowledge_base
 from app.core.agents.tools.common_tools import thread_complete
+from app.core.agents.tools.shopify_tools import check_order_status
+from app.core.agents.tools.shopify_storefront_tools import (
+    search_products,
+    get_product_details,
+    search_policies,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +28,10 @@ logger = logging.getLogger(__name__)
 TOOL_REGISTRY = {
     "search_knowledge_base": search_knowledge_base,
     "thread_complete": thread_complete,
+    "check_order_status": check_order_status,
+    "search_products": search_products,
+    "get_product_details": get_product_details,
+    "search_policies": search_policies,
 }
 
 # Default tools if agent config doesn't specify
